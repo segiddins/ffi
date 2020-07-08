@@ -45,7 +45,6 @@
 #include "Types.h"
 #include "LastError.h"
 #include "Function.h"
-#include "ClosurePool.h"
 #include "MethodHandle.h"
 #include "Call.h"
 #include "ArrayType.h"
@@ -76,7 +75,6 @@ Init_ffi_c(void)
     rbffi_ArrayType_Init(moduleFFI);
     rbffi_LastError_Init(moduleFFI);
     rbffi_Call_Init(moduleFFI);
-    rbffi_ClosurePool_Init(moduleFFI);
     rbffi_MethodHandle_Init(moduleFFI);
     rbffi_Platform_Init(moduleFFI);
     rbffi_AbstractMemory_Init(moduleFFI);

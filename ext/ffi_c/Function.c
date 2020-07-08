@@ -65,7 +65,6 @@
 #include "Type.h"
 #include "LastError.h"
 #include "Call.h"
-#include "ClosurePool.h"
 #include "MappedType.h"
 #include "Thread.h"
 #include "LongDouble.h"
@@ -77,7 +76,7 @@ typedef struct Function_ {
     FunctionType* info;
     MethodHandle* methodHandle;
     bool autorelease;
-    Closure* closure;
+    ffi_closure *closure;
     VALUE rbProc;
     VALUE rbFunctionInfo;
 } Function;
@@ -86,7 +85,7 @@ static void function_mark(Function *);
 static void function_free(Function *);
 static VALUE function_init(VALUE self, VALUE rbFunctionInfo, VALUE rbProc);
 static void callback_invoke(ffi_cif* cif, void* retval, void** parameters, void* user_data);
-static bool callback_prep(void* ctx, void* code, Closure* closure, char* errmsg, size_t errmsgsize);
+static bool callback_prep(Function *ctx, void* code, ffi_closure* closure, char* errmsg, size_t errmsgsize);
 static void* callback_with_gvl(void* data);
 static VALUE invoke_callback(VALUE data);
 static VALUE save_callback_exception(VALUE data, VALUE exc);
@@ -111,7 +110,7 @@ static VALUE async_cb_thread = Qnil;
 static ID id_call = 0, id_to_native = 0, id_from_native = 0, id_cbtable = 0, id_cb_ref = 0;
 
 struct gvl_callback {
-    Closure* closure;
+    Function *function;
     void*    retval;
     void**   parameters;
     bool done;
@@ -173,7 +172,7 @@ function_free(Function *fn)
     }
 
     if (fn->closure != NULL && fn->autorelease) {
-        rbffi_Closure_Free(fn->closure);
+        ffi_closure_free(fn->closure);
     }
 
     xfree(fn);
@@ -305,24 +304,17 @@ function_init(VALUE self, VALUE rbFunctionInfo, VALUE rbProc)
         fn->base.rbParent = rbProc;
 
     } else if (rb_obj_is_kind_of(rbProc, rb_cProc) || rb_respond_to(rbProc, id_call)) {
-        if (fn->info->closurePool == NULL) {
-            fn->info->closurePool = rbffi_ClosurePool_New(sizeof(ffi_closure), callback_prep, fn->info);
-            if (fn->info->closurePool == NULL) {
-                rb_raise(rb_eNoMemError, "failed to create closure pool");
-            }
-        }
-
 #if defined(DEFER_ASYNC_CALLBACK)
         if (async_cb_thread == Qnil) {
             async_cb_thread = rb_thread_create(async_cb_event, NULL);
         }
 #endif
 
-        fn->closure = rbffi_Closure_Alloc(fn->info->closurePool);
-        fn->closure->info = fn;
-        fn->base.memory.address = fn->closure->code;
+        fn->closure = ffi_closure_alloc(sizeof(ffi_closure), &fn->base.memory.address);
         fn->base.memory.size = sizeof(*fn->closure);
         fn->autorelease = true;
+
+        callback_prep(fn, fn->base.memory.address, fn->closure, NULL, 0);
 
     } else {
         rb_raise(rb_eTypeError, "wrong argument type %s, expected pointer or proc",
@@ -346,6 +338,8 @@ function_call(int argc, VALUE* argv, VALUE self)
     Function* fn;
 
     Data_Get_Struct(self, Function, fn);
+
+    fprintf(stderr, "%s:%lu: %s %p %d %p\n", __FILE__, __LINE__, __FUNCTION__, self, argc, argv);
 
     return (*fn->info->invoke)(argc, argv, fn->base.memory.address, fn->info);
 }
@@ -439,7 +433,7 @@ function_release(VALUE self)
         rb_raise(rb_eRuntimeError, "cannot free function which was not allocated");
     }
 
-    rbffi_Closure_Free(fn->closure);
+    ffi_closure_free(fn->closure);
     fn->closure = NULL;
 
     return self;
@@ -450,7 +444,9 @@ callback_invoke(ffi_cif* cif, void* retval, void** parameters, void* user_data)
 {
     struct gvl_callback cb = { 0 };
 
-    cb.closure = (Closure *) user_data;
+    
+
+    cb.function = ((Function *) user_data);
     cb.retval = retval;
     cb.parameters = parameters;
     cb.done = false;
@@ -644,7 +640,7 @@ invoke_callback(VALUE data)
 {
     struct gvl_callback* cb = (struct gvl_callback *) data;
 
-    Function* fn = (Function *) cb->closure->info;
+    Function* fn = (Function *) cb->function;
     FunctionType *cbInfo = fn->info;
     Type* returnType = cbInfo->returnType;
     void* retval = cb->retval;
@@ -837,19 +833,19 @@ save_callback_exception(VALUE data, VALUE exc)
 {
     struct gvl_callback* cb = (struct gvl_callback *) data;
 
-    memset(cb->retval, 0, ((Function *) cb->closure->info)->info->returnType->ffiType->size);
+    memset(cb->retval, 0, ((Function *) cb->function)->info->returnType->ffiType->size);
     if (cb->frame != NULL) cb->frame->exc = exc;
 
     return Qnil;
 }
 
 static bool
-callback_prep(void* ctx, void* code, Closure* closure, char* errmsg, size_t errmsgsize)
+callback_prep(Function *ctx, void* code, ffi_closure* closure, char* errmsg, size_t errmsgsize)
 {
-    FunctionType* fnInfo = (FunctionType *) ctx;
+    FunctionType* fnInfo = ctx->info;
     ffi_status ffiStatus;
 
-    ffiStatus = ffi_prep_closure_loc(code, &fnInfo->ffi_cif, callback_invoke, closure, code);
+    ffiStatus = ffi_prep_closure_loc(ctx->closure, &fnInfo->ffi_cif, callback_invoke, ctx, code);
     if (ffiStatus != FFI_OK) {
         snprintf(errmsg, errmsgsize, "ffi_prep_closure_loc failed.  status=%#x", ffiStatus);
         return false;

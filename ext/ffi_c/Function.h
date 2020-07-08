@@ -46,7 +46,6 @@ typedef struct FunctionType_ FunctionType;
 
 #include "Type.h"
 #include "Call.h"
-#include "ClosurePool.h"
 
 struct FunctionType_ {
     Type type; /* The native type of a FunctionInfo object */
@@ -60,7 +59,6 @@ struct FunctionType_ {
     ffi_type** ffiParameterTypes;
     ffi_cif ffi_cif;
     Invoker invoke;
-    ClosurePool* closurePool;
     int parameterCount;
     int flags;
     ffi_abi abi;

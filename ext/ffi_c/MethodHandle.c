@@ -59,7 +59,6 @@
 #include "Type.h"
 #include "LastError.h"
 #include "Call.h"
-#include "ClosurePool.h"
 #include "MethodHandle.h"
 
 
@@ -79,7 +78,7 @@
 
 
 
-static bool prep_trampoline(void* ctx, void* code, Closure* closure, char* errmsg, size_t errmsgsize);
+static bool prep_trampoline(void* ctx, void* code, void* closure, char* errmsg, size_t errmsgsize);
 static long trampoline_size(void);
 
 #if defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
@@ -88,26 +87,32 @@ static long trampoline_size(void);
 
 
 struct MethodHandle {
-    Closure* closure;
+    METHOD_CLOSURE* closure;
+    void *function;
+    FunctionType *functionInfo;
+    void * code;
 };
 
-static ClosurePool* defaultClosurePool;
+static void attached_method_invoke(ffi_cif* cif, void* mretval, METHOD_PARAMS parameters, void *userData);
 
-
+static ffi_cif mh_cif;
 MethodHandle*
 rbffi_MethodHandle_Alloc(FunctionType* fnInfo, void* function)
 {
     MethodHandle* handle;
-    Closure* closure = rbffi_Closure_Alloc(defaultClosurePool);
-    if (closure == NULL) {
+
+    handle = xcalloc(1, sizeof(*handle));
+    handle->function = function;
+    handle->functionInfo = fnInfo;
+    
+    handle->closure = ffi_closure_alloc(sizeof(ffi_closure), &handle->code);
+
+    if (handle->closure == NULL) {
         rb_raise(rb_eNoMemError, "failed to allocate closure from pool");
         return NULL;
     }
 
-    handle = xcalloc(1, sizeof(*handle));
-    handle->closure = closure;
-    closure->info = fnInfo;
-    closure->function = function;
+    ffi_prep_closure_loc(handle->closure, &mh_cif, attached_method_invoke, handle, handle->code);
 
     return handle;
 }
@@ -116,39 +121,19 @@ void
 rbffi_MethodHandle_Free(MethodHandle* handle)
 {
     if (handle != NULL) {
-        rbffi_Closure_Free(handle->closure);
+        ffi_closure_free(handle->closure);
+        handle->closure = NULL;
     }
 }
 
 rbffi_function_anyargs rbffi_MethodHandle_CodeAddress(MethodHandle* handle)
 {
-    return (rbffi_function_anyargs) handle->closure->code;
+    return (rbffi_function_anyargs) handle->code;
 }
 
 #ifndef CUSTOM_TRAMPOLINE
-static void attached_method_invoke(ffi_cif* cif, void* retval, METHOD_PARAMS parameters, void* user_data);
 
 static ffi_type* methodHandleParamTypes[3];
-
-static ffi_cif mh_cif;
-
-static bool
-prep_trampoline(void* ctx, void* code, Closure* closure, char* errmsg, size_t errmsgsize)
-{
-    ffi_status ffiStatus;
-
-#if defined(USE_RAW)
-    ffiStatus = ffi_prep_raw_closure(code, &mh_cif, attached_method_invoke, closure);
-#else
-    ffiStatus = ffi_prep_closure_loc(code, &mh_cif, attached_method_invoke, closure, code);
-#endif
-    if (ffiStatus != FFI_OK) {
-        snprintf(errmsg, errmsgsize, "ffi_prep_closure_loc failed.  status=%#x", ffiStatus);
-        return false;
-    }
-
-    return true;
-}
 
 
 static long
@@ -162,11 +147,10 @@ trampoline_size(void)
  * with struct param or return values
  */
 static void
-attached_method_invoke(ffi_cif* cif, void* mretval, METHOD_PARAMS parameters, void* user_data)
+attached_method_invoke(ffi_cif* cif, void* mretval, METHOD_PARAMS parameters, void* userData)
 {
-    Closure* handle =  (Closure *) user_data;
-    FunctionType* fnInfo = (FunctionType *) handle->info;
 
+    struct MethodHandle* handle = userData;
 #ifdef USE_RAW
     int argc = parameters[0].sint;
     VALUE* argv = *(VALUE **) &parameters[1];
@@ -175,7 +159,9 @@ attached_method_invoke(ffi_cif* cif, void* mretval, METHOD_PARAMS parameters, vo
     VALUE* argv = *(VALUE **) parameters[1];
 #endif
 
-    *(VALUE *) mretval = (*fnInfo->invoke)(argc, argv, handle->function, fnInfo);
+    fprintf(stderr, "%s:%lu: %s %p %d %p\n", __FILE__, __LINE__, __FUNCTION__, mretval, argc, argv);
+    VALUE intermediary = (*handle->functionInfo->invoke)(argc, argv, handle->function, handle->functionInfo);
+    *(VALUE *) mretval = intermediary;
 }
 
 #endif
@@ -330,8 +316,6 @@ rbffi_MethodHandle_Init(VALUE module)
 #ifndef CUSTOM_TRAMPOLINE
     ffi_status ffiStatus;
 #endif
-
-    defaultClosurePool = rbffi_ClosurePool_New((int) trampoline_size(), prep_trampoline, NULL);
 
 #if defined(CUSTOM_TRAMPOLINE)
     if (trampoline_offsets(&trampoline_ctx_offset, &trampoline_func_offset) != 0) {
